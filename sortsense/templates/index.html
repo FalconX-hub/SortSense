@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SortSense - sort it right</title>
+<style>
+:root{--bg:#0e1a14;--card:#16281f;--ink:#e8f5ec;--mut:#8fb09b;--acc:#4ade80;--bad:#f87171}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+main{max-width:720px;margin:auto;padding:20px}h1{margin:0 0 4px}p.sub{color:var(--mut);margin-top:0}
+.card{background:var(--card);border-radius:16px;padding:16px;margin:14px 0}
+input,select,button{font:inherit;border-radius:10px;border:1px solid #2a4a38;background:#0e1a14;color:var(--ink);padding:10px}
+button{cursor:pointer}button.pri{background:var(--acc);color:#052e16;border:0;font-weight:700}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>input{flex:1;min-width:160px}
+.bins button{flex:1;min-width:120px}.comp{display:flex;gap:12px;align-items:center;border-top:1px solid #2a4a38;padding:10px 0}
+.emoji{font-size:2rem}.mut{color:var(--mut);font-size:.9rem}.ok{color:var(--acc)}.ko{color:var(--bad)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.stat b{display:block;font-size:1.6rem;color:var(--acc)}
+</style></head><body><main>
+<h1>♻️ SortSense</h1><p class="sub">Scan a barcode or search an item: know exactly which bin each part goes in.</p>
+
+<div class="card">
+  <div class="row">
+    <select id="region" aria-label="Region">{% for k,v in regions.items() %}<option value="{{k}}">{{v}}</option>{% endfor %}</select>
+    <label class="mut"><input type="checkbox" id="challenge" checked> Challenge mode (guess first)</label>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <input id="code" inputmode="numeric" placeholder="Barcode (try 00000001)">
+    <button class="pri" id="goCode">Look up</button>
+    <button id="cam" hidden>📷 Scan</button>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <input id="q" placeholder="Or search: pizza box, battery, yogurt pot…">
+    <button class="pri" id="goQ">Search</button>
+  </div>
+  <video id="vid" hidden playsinline style="width:100%;border-radius:12px;margin-top:10px"></video>
+</div>
+
+<div class="card bins" id="guess" hidden>
+  <b>Where would you put it?</b><div class="row" style="margin-top:8px" id="guessBtns"></div>
+</div>
+<div class="card" id="result" hidden></div>
+
+<div class="card"><b>Your impact</b><div class="stats" id="stats" style="margin-top:10px"></div></div>
+<p class="mut">CO₂ figures are illustrative estimates. Rules are simplified: always check your local guidelines.</p>
+</main>
+<script>
+const BINS = {{ bins|tojson }};
+const $ = id => document.getElementById(id);
+let pending = null;
+
+function el(tag, text, cls){const e=document.createElement(tag); if(text!==undefined)e.textContent=text; if(cls)e.className=cls; return e;}
+function region(){return $('region').value}
+
+async function api(url, opts){const r=await fetch(url,opts); const j=await r.json(); if(!r.ok) throw new Error(j.error||'Error'); return j;}
+
+function showError(msg){const r=$('result'); r.hidden=false; r.replaceChildren(el('span',msg,'ko'));}
+
+function render(title, subtitle, comps, guessBin){
+  const r=$('result'); r.hidden=false; r.replaceChildren(el('h3',title)); if(subtitle) r.append(el('div',subtitle,'mut'));
+  if(guessBin){const ok=guessBin===comps[0].bin;
+    r.append(el('p', ok?'✅ You were right!':'❌ Good thing you checked: it goes in '+BINS[comps[0].bin].label, ok?'ok':'ko'));}
+  comps.forEach(c=>{const d=el('div',undefined,'comp'); d.append(el('div',c.emoji,'emoji'));
+    const t=el('div'); t.append(el('b',(c.shape!=='unknown'?c.shape+' - ':'')+c.material+' → '+c.label)); t.append(el('div',c.tip,'mut')); d.append(t); r.append(d);});
+}
+
+async function logAll(item, comps, guess){
+  for(let i=0;i<comps.length;i++){
+    await api('/api/log',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({item,material:comps[i].material||'unknown',correct_bin:comps[i].bin,guess_bin:i===0?guess:null,region:region()})});
+  }
+  loadStats();
+}
+
+function ask(item, subtitle, comps){
+  if(!$('challenge').checked){render(item,subtitle,comps,null); logAll(item,comps,null); return;}
+  pending={item,subtitle,comps}; $('result').hidden=true; const g=$('guess'); g.hidden=false;
+  const box=$('guessBtns'); box.replaceChildren();
+  Object.entries(BINS).filter(([k])=>k!=='unknown').forEach(([k,v])=>{const b=el('button',v.emoji+' '+v.label); b.onclick=()=>reveal(k); box.append(b);});
+}
+function reveal(guess){const p=pending; $('guess').hidden=true; render(p.item,p.subtitle,p.comps,guess); logAll(p.item,p.comps,guess);}
+
+$('goCode').onclick=async()=>{try{
+  const j=await api('/api/barcode/'+encodeURIComponent($('code').value.trim())+'?region='+region());
+  if(!j.components.length) return showError('No packaging data for this product yet.');
+  ask(j.name, (j.brand||'')+(j.source==='demo'?' (demo data)':''), j.components);
+}catch(e){showError(e.message)}};
+
+$('goQ').onclick=async()=>{try{
+  const j=await api('/api/item?q='+encodeURIComponent($('q').value)+'&region='+region());
+  if(!j.results.length) return showError('No match. Try another word.');
+  const top=j.results[0], b=BINS[top.bin];
+  ask(top.name,'',[{shape:'unknown',material:'item',bin:top.bin,label:b.label,emoji:b.emoji,tip:top.tip}]);
+}catch(e){showError(e.message)}};
+
+async function loadStats(){
+  const s=await api('/api/stats'), box=$('stats'); box.replaceChildren();
+  const add=(v,l)=>{const d=el('div',undefined,'stat'); d.append(el('b',String(v)),el('span',l,'mut')); box.append(d);};
+  add(s.items,'items sorted'); add(s.misplaced_avoided,'mistakes avoided');
+  add(s.mistake_rate===null?'-':Math.round(s.mistake_rate*100)+'%','mistake rate when guessing'); add(s.co2_kg+' kg','CO₂e diverted (est.)');
+}
+
+if('BarcodeDetector' in window){ $('cam').hidden=false; $('cam').onclick=async()=>{
+  const v=$('vid'); v.hidden=false; v.srcObject=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}); await v.play();
+  const det=new BarcodeDetector({formats:['ean_13','ean_8','upc_a']});
+  const loop=async()=>{const r=await det.detect(v); if(r.length){$('code').value=r[0].rawValue; v.srcObject.getTracks().forEach(t=>t.stop()); v.hidden=true; $('goCode').click();} else if(!v.hidden) requestAnimationFrame(loop);};
+  loop();};}
+loadStats();
+</script></body></html>
